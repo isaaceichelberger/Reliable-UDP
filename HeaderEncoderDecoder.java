@@ -7,12 +7,16 @@ public class HeaderEncoderDecoder {
     private int frameNumber;
     private int frameSize;
     private int windowSize;
-    private byte[] header = new byte[6];
+    private int flipBit;
+    private int ending;
+    private byte[] header = new byte[10];
 
-    public HeaderEncoderDecoder(int frameNumber, int frameSize, int windowSize){
+    public HeaderEncoderDecoder(int frameNumber, int frameSize, int windowSize, int flipBit, int ending){
         this.frameNumber = frameNumber;
         this.frameSize = frameSize;
         this.windowSize = windowSize;
+        this.flipBit = flipBit;
+        this.ending = ending;
         buildHeader();
     }
 
@@ -25,8 +29,9 @@ public class HeaderEncoderDecoder {
         String frameNumberHex = toHex(frameNumber);
         String frameSizeHex = toHex(frameSize);
         String windowSizeHex = toHex(windowSize);
-        String hexString = frameNumberHex + frameSizeHex + windowSizeHex;
-
+        String flipBitHex = toHex(flipBit);
+        String endingHex = toHex(ending);
+        String hexString = frameNumberHex + frameSizeHex + windowSizeHex + flipBitHex + endingHex;
         byte[] bytes = new byte[hexString.length() / 2];
         for (int i = 0; i < hexString.length(); i += 2) {
             bytes[i / 2] = hexToByte(hexString.substring(i, i + 2));
@@ -48,9 +53,13 @@ public class HeaderEncoderDecoder {
         String frameNumberHex = hexString.substring(0, 4);
         String frameSizeHex = hexString.substring(4, 8);
         String windowSizeHex = hexString.substring(8, 12);
+        String flipBitHex = hexString.substring(12, 16);
+        String endingHex = hexString.substring(16, 20);
         this.frameNumber = hexToDecimal(frameNumberHex);
         this.frameSize = hexToDecimal(frameSizeHex);
         this.windowSize = hexToDecimal(windowSizeHex);
+        this.flipBit = hexToDecimal(flipBitHex);
+        this.ending = hexToDecimal(endingHex);
 
     }
 
@@ -84,6 +93,22 @@ public class HeaderEncoderDecoder {
 
     public void setHeader(byte[] header) {
         this.header = header;
+    }
+
+    public int getFlipBit() {
+        return flipBit;
+    }
+
+    public void setFlipBit(int flipBit) {
+        this.flipBit = flipBit;
+    }
+
+    public int getEnding() {
+        return ending;
+    }
+
+    public void setEnding(int ending) {
+        this.ending = ending;
     }
 
     private static String toHex(int decimal){
@@ -136,4 +161,5 @@ public class HeaderEncoderDecoder {
         }
         return val;
     }
+
 }
