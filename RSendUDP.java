@@ -1,15 +1,12 @@
 import edu.utulsa.unet.RSendUDPI;
 import edu.utulsa.unet.UDPSocket;
-import jdk.jfr.DataAmount;
 
-import javax.xml.crypto.Data;
 import java.io.*;
 import java.net.*;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Arrays;
 
 public class RSendUDP implements RSendUDPI {
 
@@ -19,7 +16,7 @@ public class RSendUDP implements RSendUDPI {
     private long timeout;
     private int port;
     private InetSocketAddress receiver;
-    private int LEN_HEADER = 6;
+    private int LEN_HEADER = 10;
 
     public RSendUDP(){
         // setting defaults
@@ -86,7 +83,7 @@ public class RSendUDP implements RSendUDPI {
         try {
             UDPSocket socket = new UDPSocket(port);
             File fileToSend = new File(fileName);
-            int bufferCapacity = socket.getSendBufferSize() - 6; // subtract size of header
+            int bufferCapacity = socket.getSendBufferSize() - LEN_HEADER; // subtract size of header
             socket.setSoTimeout((int) timeout);
 
             System.out.println("Sending " + fileName + " from " + socket.getLocalAddress().toString() +
@@ -100,6 +97,7 @@ public class RSendUDP implements RSendUDPI {
                     int offset = 0;
                     int flip_bit = 0;
                     int msgcount = 1;
+                    int ending = 0;
                     int frameSize = (int) Math.min(bufferCapacity, fileToSend.length());
                     Path path = Paths.get(fileName);
                     byte[] all_file_data = Files.readAllBytes(path);
@@ -109,10 +107,11 @@ public class RSendUDP implements RSendUDPI {
                         // Calculate where loop ends
                         int maximum_loop = (int) Math.min(msgcount * (frameSize), fileToSend.length());
                         // If maximum_loop = file length, the frameSize changes for the last header
-                        if (maximum_loop == fileToSend.length()){
+                        if (maximum_loop == fileToSend.length()){ // This is the last iteration of the data sending
                             frameSize = (int) fileToSend.length() - offset;
+                            ending = 1;
                         }
-                        HeaderEncoderDecoder headerEncoder = new HeaderEncoderDecoder(msgcount, frameSize, 1); // creates header
+                        HeaderEncoderDecoder headerEncoder = new HeaderEncoderDecoder(msgcount, frameSize, 1, flip_bit, ending); // creates header
                         byte data[] = combine_byte_arrays(headerEncoder.getHeader(), byteBuffer);
                         for (int i = offset; i < maximum_loop; i++){
                             if (offset >= frameSize){
@@ -126,13 +125,14 @@ public class RSendUDP implements RSendUDPI {
                         System.out.println("Message " + msgcount + " sent with " + Integer.toString((int)
                                 frameSize) +
                                 " bytes of actual data");
-                        validateAck(socket, msgcount, packet);
+                        validateAck(socket, msgcount, packet, flip_bit);
                         offset += frameSize;
                         msgcount++;
+                        flip_bit = (flip_bit == 0 ? 1 : 0); // Change the flip bit
                     }
                     long end_time = System.nanoTime();
                     System.out.println("Successfully transferred " + fileName + " (" + fileToSend.length() +
-                            " bytes) in " + (end_time - start_time) / 1000000 + " ms");
+                            " bytes) in " + (end_time - start_time) / 1000000000 + " seconds");
                 } catch (FileNotFoundException e){
                     System.out.println("File not found");
                 } catch (IOException e2){
@@ -157,7 +157,7 @@ public class RSendUDP implements RSendUDPI {
         return buff.array();
     }
 
-    private boolean validateAck(UDPSocket socket, int frameNumber, DatagramPacket packet) {
+    private void validateAck(UDPSocket socket, int frameNumber, DatagramPacket packet, int flip_bit) {
         byte[] ackBuffer = new byte[4];
         try {
             DatagramPacket ack = new DatagramPacket(ackBuffer, 4);
@@ -165,29 +165,25 @@ public class RSendUDP implements RSendUDPI {
             int acknowledgedFrameNumber = ByteBuffer.wrap(ack.getData()).getInt();
             if (acknowledgedFrameNumber == frameNumber) {
                 System.out.println("Message " + frameNumber + " acknowledged.");
-                return true;
-            } else {
-                return false;
             }
         } catch (SocketTimeoutException e) {
             System.out.println("Message " + frameNumber + " not acknowledged. Resending Message.");
-            resendPacket(socket, packet, frameNumber);
+            resendPacket(socket, packet, frameNumber, flip_bit);
         } catch (IOException e1){
             e1.printStackTrace();
         }
-        return false;
     }
 
-    private void resendPacket(UDPSocket socket, DatagramPacket packet, int frameNumber){
+    private void resendPacket(UDPSocket socket, DatagramPacket packet, int frameNumber, int flip_bit){
         try {
             socket.send(packet);
-            validateAck(socket, frameNumber, packet);
+            validateAck(socket, frameNumber, packet, flip_bit);
         } catch (SocketTimeoutException e){
-            System.out.println("Message " + frameNumber + " not acknowledged. Resending Message.");
-            resendPacket(socket, packet, frameNumber);
+            e.printStackTrace();
         } catch (IOException e1){
             e1.printStackTrace();
         }
 
     }
+
 }

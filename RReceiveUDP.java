@@ -2,15 +2,9 @@ import edu.utulsa.unet.RReceiveUDPI;
 import edu.utulsa.unet.UDPSocket;
 
 import java.io.*;
-import java.net.DatagramPacket;
-import java.net.InetSocketAddress;
-import java.net.SocketException;
+import java.net.DatagramPacket;import java.net.SocketException;
 import java.nio.ByteBuffer;
-import java.nio.file.Files;
-import java.nio.file.OpenOption;
-import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
-import java.util.Arrays;
+import java.util.HashSet;
 
 public class RReceiveUDP implements RReceiveUDPI {
 
@@ -19,7 +13,7 @@ public class RReceiveUDP implements RReceiveUDPI {
     private String fileName;
     private long timeout;
     private int port;
-    int LEN_HEADER = 6;
+    private int LEN_HEADER = 10;
 
     public RReceiveUDP(){
         this.mode = 0;
@@ -71,31 +65,73 @@ public class RReceiveUDP implements RReceiveUDPI {
             File fileToReceive = new File(fileName);
             int bufferCapacity = socket.getSendBufferSize();
             FileOutputStream fileWriter;
-            //socket.setSoTimeout((int) timeout);
 
             //System.out.println("Receiving " + fileName + " from " + socket.getInetAddress().toString() +
                     //":" + socket.getPort() + " to " + socket.getLocalAddress().toString() + ":" +
                     //socket.getLocalPort());
+
             if (mode == 0){
                 System.out.println("Using stop-and-wait");
+                boolean receiving = false;
                 try {
-                    byte[] byteBuffer = new byte[bufferCapacity];
                     fileWriter = new FileOutputStream(fileToReceive);
-                    int offset = 0;
+                    fileWriter.flush();
                     while (true){
+                        byte[] byteBuffer = new byte[bufferCapacity];
                         DatagramPacket packet = new DatagramPacket(byteBuffer, bufferCapacity);
                         socket.receive(packet);
-                        byte[] packetData = packet.getData();
-                        byte[] header = retrieveHeader(packetData);
-                        byte[] data = retrieveData(packetData);
-                        HeaderEncoderDecoder headerDecoder = new HeaderEncoderDecoder(header);
-                        System.out.println("Message " + Integer.toString(headerDecoder.getFrameNumber()) + " received.");
-                        System.out.println(Integer.toString(headerDecoder.getFrameSize()) + " bytes of actual data from " + packet.getAddress());
-                        int frameSize = headerDecoder.getFrameSize();
-                        fileWriter.write(data, 0, frameSize);
-                        byte[] ack =  ByteBuffer.allocate(4).putInt(headerDecoder.getFrameNumber()).array();
-                        socket.send(new DatagramPacket(ack, ack.length, packet.getSocketAddress())); // send back an ack
-                        offset += 1;
+                        if (checkExtraneousPacket(packet)){
+                            continue; // skip
+                        }
+                        receiving = true;
+                        HashSet<Integer> acknowledgedFrames = new HashSet<>();
+                        int previous_flip_bit = 1; // initialize to 1 bc we will start at 0
+                        boolean first_entry = true;
+                        long start_time = System.nanoTime();
+                        while (receiving){
+                            // We need to only receive in this loop on the second entry and more, otherwise we
+                            // needlessly require retransmission
+                            if (!first_entry) {
+                                socket.receive(packet);
+                            }
+                            byte[] packetData = packet.getData();
+                            byte[] header = retrieveHeader(packetData);
+                            byte[] data = retrieveData(packetData);
+                            HeaderEncoderDecoder headerDecoder = new HeaderEncoderDecoder(header);
+                            System.out.println("Message " + Integer.toString(headerDecoder.getFrameNumber()) + " received.");
+                            System.out.println(Integer.toString(headerDecoder.getFrameSize()) + " bytes of actual data from " + packet.getAddress());
+                            // Check if the message was a retransmitted message
+                            if (headerDecoder.getFlipBit() == previous_flip_bit){
+                                //System.out.println("Message was retransmitted");
+                                // we do not want to write this if we have already acknowledged it
+                                if (acknowledgedFrames.contains(headerDecoder.getFrameNumber())){
+                                    // acknowledge the frame, in case our ack was dropped
+                                    byte[] ack =  ByteBuffer.allocate(4).putInt(headerDecoder.getFrameNumber()).array();
+                                    socket.send(new DatagramPacket(ack, ack.length, packet.getSocketAddress())); // send back an ack
+                                    continue;
+                                }
+                            }
+                            int frameSize = headerDecoder.getFrameSize();
+                            fileWriter.write(data, 0, frameSize);
+
+                            // Send Ack
+                            byte[] ack =  ByteBuffer.allocate(4).putInt(headerDecoder.getFrameNumber()).array();
+                            socket.send(new DatagramPacket(ack, ack.length, packet.getSocketAddress())); // send back an ack
+
+                            // Set up for next frame to be received
+                            acknowledgedFrames.add(headerDecoder.getFrameNumber()); // add to acknowledged frames so we don't rewrite
+                            previous_flip_bit = headerDecoder.getFlipBit();
+                            first_entry = false;
+
+                            // If ending frame
+                            if (headerDecoder.getEnding() == 1){
+                                long end_time = System.nanoTime();
+                                System.out.println("Successfully received " + fileName + " ("
+                                        + fileToReceive.length() + " bytes) in " + (end_time - start_time) / 1000000000 + " seconds");
+                                receiving = false;
+                                fileWriter.flush(); //TODO ASK PAPA IF FILE NEEDS TO BE CLEARED OR WHAT BC LIKE THIS KINDA ISSUE?
+                            }
+                        }
                    }
                 } catch (FileNotFoundException e){
                     System.out.println("File not found");
@@ -126,5 +162,16 @@ public class RReceiveUDP implements RReceiveUDPI {
         byte[] data = new byte[headerAndData.length - LEN_HEADER];
         System.arraycopy(headerAndData, LEN_HEADER, data, 0, data.length);
         return data;
+    }
+
+    private boolean checkExtraneousPacket(DatagramPacket packet){
+        byte[] packetData = packet.getData();
+        byte[] header = retrieveHeader(packetData);
+        HeaderEncoderDecoder headerDecoder = new HeaderEncoderDecoder(header);
+        if (headerDecoder.getFrameNumber() != 1){
+            return true; // extraneous
+        } else {
+            return false;
+        }
     }
 }
