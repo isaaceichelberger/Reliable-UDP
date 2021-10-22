@@ -6,8 +6,8 @@ public class UDPSenderDriver {
 
         RSendUDP sender = new RSendUDP();
         sender.setMode(0);
-        //sender.setModeParameter(512);
-        sender.setTimeout(10000);
+        sender.setModeParameter(512);
+        sender.setTimeout(2000);
         sender.setFilename("important.txt");
         sender.setLocalPort(23456);
         sender.setReceiver(new InetSocketAddress("localhost", 32456));

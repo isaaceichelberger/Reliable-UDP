@@ -7,6 +7,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 
 public class RSendUDP implements RSendUDPI {
 
@@ -125,7 +126,7 @@ public class RSendUDP implements RSendUDPI {
                         System.out.println("Message " + msgcount + " sent with " + Integer.toString((int)
                                 frameSize) +
                                 " bytes of actual data");
-                        validateAck(socket, msgcount, packet, flip_bit);
+                        validateAck(socket, msgcount, packet, flip_bit, 0);
                         offset += frameSize;
                         msgcount++;
                         flip_bit = (flip_bit == 0 ? 1 : 0); // Change the flip bit
@@ -141,7 +142,61 @@ public class RSendUDP implements RSendUDPI {
 
             } else if (mode == 1){
                 System.out.println("Using sliding window");
-                // TODO
+                int outstanding_frames = (int) modeParameter / socket.getSendBufferSize();
+                ArrayList<DatagramPacket> packetsSent = new ArrayList<>();
+                try {
+                    int offset = 0;
+                    int msgcount = 1;
+                    int ending = 0;
+                    int lastAckReceived = 0; // never will receive this
+                    int lastFrameSent = 0; // lastFrameSent - lastAckReceived MUST be <= modeParameter
+                    int frameSize = (int) Math.min(bufferCapacity, fileToSend.length());
+                    Path path = Paths.get(fileName);
+                    byte[] all_file_data = Files.readAllBytes(path);
+                    long start_time = System.nanoTime();
+                    while (offset < all_file_data.length) {
+                        int temp = lastAckReceived;
+                        if (lastFrameSent + 1 - temp > outstanding_frames) {
+                            lastAckReceived = validateAckSlidingWindow(socket, packetsSent, lastAckReceived, lastFrameSent, lastAckReceived);
+                        } else {
+                            byte[] byteBuffer = new byte[bufferCapacity];
+                            // Calculate where loop ends
+                            int maximum_loop = (int) Math.min(msgcount * (frameSize), fileToSend.length());
+                            // If maximum_loop = file length, the frameSize changes for the last header
+                            if (maximum_loop == fileToSend.length()) { // This is the last iteration of the data sending
+                                frameSize = (int) fileToSend.length() - offset;
+                                ending = 1;
+                            }
+                            HeaderEncoderDecoder headerEncoder = new HeaderEncoderDecoder(msgcount, frameSize, (int) modeParameter, 0, ending); // creates header
+                            byte data[] = combine_byte_arrays(headerEncoder.getHeader(), byteBuffer);
+                            for (int i = offset; i < maximum_loop; i++) {
+                                if (offset >= frameSize) {
+                                    data[i - offset + LEN_HEADER] = all_file_data[i];
+                                } else {
+                                    data[i + LEN_HEADER] = all_file_data[i];
+                                }
+                            }
+                            DatagramPacket packet = new DatagramPacket(data, data.length, receiver);
+                            packetsSent.add(packet);
+                            socket.send(packet);
+                            System.out.println("Message " + msgcount + " sent with " + Integer.toString((int)
+                                    frameSize) +
+                                    " bytes of actual data");
+                            lastFrameSent = msgcount; // update the value of lastFrameSent
+                            offset += frameSize;
+                            msgcount++;
+                        }
+                    }
+                    // If the file is shorter than the sliding window size, we still need to check acks
+                    validateAckSlidingWindowLastLoop(socket, packetsSent, lastAckReceived, lastFrameSent, lastAckReceived, 0);
+                    long end_time = System.nanoTime();
+                    System.out.println("Successfully transferred " + fileName + " (" + fileToSend.length() +
+                            " bytes) in " + (end_time - start_time) / 1000000000 + " seconds");
+                } catch (FileNotFoundException e){
+                    System.out.println("File not found");
+                } catch (IOException e2){
+                    e2.printStackTrace();
+                }
             }
         } catch (SocketException e){
             e.printStackTrace();
@@ -157,7 +212,7 @@ public class RSendUDP implements RSendUDPI {
         return buff.array();
     }
 
-    private void validateAck(UDPSocket socket, int frameNumber, DatagramPacket packet, int flip_bit) {
+    private void validateAck(UDPSocket socket, int frameNumber, DatagramPacket packet, int flip_bit, int retry) {
         byte[] ackBuffer = new byte[4];
         try {
             DatagramPacket ack = new DatagramPacket(ackBuffer, 4);
@@ -168,22 +223,100 @@ public class RSendUDP implements RSendUDPI {
             }
         } catch (SocketTimeoutException e) {
             System.out.println("Message " + frameNumber + " not acknowledged. Resending Message.");
-            resendPacket(socket, packet, frameNumber, flip_bit);
+            resendPacket(socket, packet, frameNumber, flip_bit, retry);
         } catch (IOException e1){
             e1.printStackTrace();
         }
     }
 
-    private void resendPacket(UDPSocket socket, DatagramPacket packet, int frameNumber, int flip_bit){
+    private void resendPacket(UDPSocket socket, DatagramPacket packet, int frameNumber, int flip_bit, int retry){
         try {
+            int maxRetry = 8;
+            if (retry == maxRetry){
+                return;
+            }
             socket.send(packet);
-            validateAck(socket, frameNumber, packet, flip_bit);
+            validateAck(socket, frameNumber, packet, flip_bit, retry);
         } catch (SocketTimeoutException e){
             e.printStackTrace();
         } catch (IOException e1){
             e1.printStackTrace();
         }
-
     }
+
+    private int validateAckSlidingWindow(UDPSocket socket, ArrayList<DatagramPacket> packetsSent, int lastAckReceived, int lastFrameSent, int originalLastAckReceived){
+        byte[] ackBuffer = new byte[4];
+        try {
+            DatagramPacket ack = new DatagramPacket(ackBuffer, 4);
+            socket.receive(ack);
+            lastAckReceived = Math.max(lastAckReceived, ByteBuffer.wrap(ack.getData()).getInt());
+            System.out.println("Ack Received: " + lastAckReceived);
+            if (lastAckReceived > originalLastAckReceived)
+                return lastAckReceived; // stop the loop
+        } catch (SocketTimeoutException e) {
+            // If we get here, there's nothing to receive because we need something resent
+            resendPacketSlidingWindow(socket, packetsSent, lastAckReceived, lastFrameSent, originalLastAckReceived);
+            } catch (IOException e1){
+        }
+        return lastAckReceived;
+    }
+
+    private void resendPacketSlidingWindow(UDPSocket socket, ArrayList<DatagramPacket> packetsSent, int lastAckReceived, int lastFrameSent, int originalLastAckReceived){
+        try {
+            System.out.println("No Ack received. Resending outstanding packets.");
+            for (int i = lastAckReceived; i < lastFrameSent; i++){
+                System.out.println("Resending " + (i + 1));
+                socket.send(packetsSent.get(i));
+            }
+            validateAckSlidingWindow(socket, packetsSent, lastAckReceived, lastFrameSent, originalLastAckReceived);
+        } catch (SocketTimeoutException e){
+            validateAckSlidingWindow(socket, packetsSent, lastAckReceived, lastFrameSent, originalLastAckReceived);
+        } catch (IOException e1){
+        }
+    }
+
+    private int validateAckSlidingWindowLastLoop(UDPSocket socket, ArrayList<DatagramPacket> packetsSent, int lastAckReceived, int lastFrameSent, int originalLastAckReceived, int retry){
+        byte[] ackBuffer = new byte[4];
+        try {
+            DatagramPacket ack = new DatagramPacket(ackBuffer, 4);
+            if (lastFrameSent >= lastAckReceived){
+                socket.receive(ack);
+                int temp = lastAckReceived;
+                lastAckReceived = Math.max(temp, ByteBuffer.wrap(ack.getData()).getInt());
+                if (temp != lastAckReceived){ // Only print if new ack
+                    System.out.println("Ack Received: " + lastAckReceived);
+                }
+                if (lastAckReceived == lastFrameSent) {
+                    return lastAckReceived; // stop the loop
+                } else {
+                    resendPacketSlidingWindowLastLoop(socket, packetsSent, lastAckReceived, lastFrameSent, originalLastAckReceived, retry);
+                }
+            }
+        } catch (SocketTimeoutException e) {
+            // If we get here, there's nothing to receive because we need something resent
+            resendPacketSlidingWindowLastLoop(socket, packetsSent, lastAckReceived, lastFrameSent, originalLastAckReceived, retry);
+        } catch (IOException e1){
+        }
+        return lastAckReceived;
+    }
+
+    private void resendPacketSlidingWindowLastLoop(UDPSocket socket, ArrayList<DatagramPacket> packetsSent, int lastAckReceived, int lastFrameSent, int originalLastAckReceived, int retry){
+        try {
+            int maxRetry = 8;
+            retry++;
+            for (int i = lastAckReceived; i < lastFrameSent; i++){
+                System.out.println("Resending " + (i + 1));
+                socket.send(packetsSent.get(i));
+            }
+            if (retry == maxRetry){
+                return;
+            }
+            validateAckSlidingWindowLastLoop(socket, packetsSent, lastAckReceived, lastFrameSent, originalLastAckReceived, retry);
+        } catch (SocketTimeoutException e){
+        } catch (IOException e1){
+        }
+    }
+
+
 
 }
