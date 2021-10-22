@@ -236,6 +236,7 @@ public class RSendUDP implements RSendUDPI {
                 return;
             }
             socket.send(packet);
+            retry++;
             validateAck(socket, frameNumber, packet, flip_bit, retry);
         } catch (SocketTimeoutException e){
             e.printStackTrace();
